@@ -1,15 +1,12 @@
 import { useState, useEffect } from "react"
-import type { PlasmoCSConfig } from "plasmo"
 
 import "./style.css"
-
-export const getConfig = (): PlasmoCSConfig => ({
-  matches: ["<all_urls>"]
-})
 
 function IndexPopup() {
   const [preferredCurrency, setPreferredCurrency] = useState("USD")
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({})
+  const [isEnabled, setIsEnabled] = useState(true)
+  const [aiEnabled, setAiEnabled] = useState(false)
 
   const currencies = [
     "USD", "EUR", "GBP", "GHS", "NGN", "CAD", "AUD", "JPY", "CNY"
@@ -19,13 +16,21 @@ function IndexPopup() {
     const loadSettings = async () => {
       const result = await chrome.storage.local.get([
         "preferredCurrency",
-        "exchangeRates"
+        "exchangeRates",
+        "isEnabled",
+        "aiEnabled"
       ])
       if (result.preferredCurrency) {
         setPreferredCurrency(result.preferredCurrency)
       }
       if (result.exchangeRates) {
         setExchangeRates(result.exchangeRates)
+      }
+      if (typeof result.isEnabled !== "undefined") {
+        setIsEnabled(result.isEnabled)
+      }
+      if (typeof result.aiEnabled !== "undefined") {
+        setAiEnabled(result.aiEnabled)
       }
     }
     loadSettings()
@@ -35,6 +40,15 @@ function IndexPopup() {
     const currency = e.target.value
     setPreferredCurrency(currency)
     await chrome.storage.local.set({ preferredCurrency: currency })
+  }
+
+  const handleToggle = async (key: "isEnabled" | "aiEnabled", value: boolean) => {
+    if (key === "isEnabled") {
+      setIsEnabled(value)
+    } else {
+      setAiEnabled(value)
+    }
+    await chrome.storage.local.set({ [key]: value })
   }
 
   return (
@@ -50,6 +64,55 @@ function IndexPopup() {
       </div>
 
       <div className="space-y-4">
+        {/* Toggle Section */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-3">
+              <span className="text-lg">{isEnabled ? "🟢" : "🔴"}</span>
+              <span className="text-sm font-medium text-gray-800">
+                Currency Converter
+              </span>
+            </div>
+            <button
+              onClick={() => handleToggle("isEnabled", !isEnabled)}
+              className={`relative w-12 h-6 rounded-full transition-colors ${
+                isEnabled ? "bg-blue-500" : "bg-gray-300"
+              }`}
+            >
+              <div
+                className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                  isEnabled ? "translate-x-6" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-3">
+              <span className="text-lg">{aiEnabled ? "🤖" : "⚙️"}</span>
+              <div>
+                <span className="text-sm font-medium text-gray-800">
+                  AI Financial Explanations
+                </span>
+                <p className="text-xs text-gray-500">Adds real-world context to prices</p>
+              </div>
+            </div>
+            <button
+              onClick={() => handleToggle("aiEnabled", !aiEnabled)}
+              className={`relative w-12 h-6 rounded-full transition-colors ${
+                aiEnabled ? "bg-purple-500" : "bg-gray-300"
+              }`}
+            >
+              <div
+                className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                  aiEnabled ? "translate-x-6" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+
+        {/* Currency Selection */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
             Preferred Currency
@@ -67,6 +130,7 @@ function IndexPopup() {
           </select>
         </div>
 
+        {/* Live Rates */}
         <div className="pt-4 border-t border-gray-200">
           <div className="text-sm text-gray-600 mb-2">Live Rates (vs USD)</div>
           <div className="max-h-48 overflow-y-auto space-y-2">

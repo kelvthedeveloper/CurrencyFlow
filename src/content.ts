@@ -1,7 +1,9 @@
 import type { PlasmoCSConfig } from "plasmo"
+import { getAIExplanation } from "./ai"
 
 export const config: PlasmoCSConfig = {
-  matches: ["<all_urls>"]
+  matches: ["<all_urls>"],
+  all_frames: true
 }
 
 console.log("CurrencyFlow Content Script Loaded")
@@ -19,15 +21,29 @@ const currencySymbols: Record<string, string> = {
   "CN¥": "CNY"
 }
 
-// Regex to find prices
-const priceRegex = /(\$|€|£|₵|₦|C\$|A\$|¥|CN¥)\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g
+// Regex to find prices - more robust pattern
+const priceRegex = /(\$|€|£|₵|₦|C\$|A\$|¥|CN¥)\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)/g
 
-async function getSettings() {
+// Keep track of processed elements to avoid duplicates
+const processedElements = new WeakSet<Node>()
+
+let settings = {
+  isEnabled: true,
+  aiEnabled: false,
+  preferredCurrency: "USD",
+  exchangeRates: {} as Record<string, number>
+}
+
+async function loadSettings() {
   const result = await chrome.storage.local.get([
+    "isEnabled",
+    "aiEnabled",
     "preferredCurrency",
     "exchangeRates"
   ])
-  return {
+  settings = {
+    isEnabled: result.isEnabled !== false,
+    aiEnabled: result.aiEnabled || false,
     preferredCurrency: result.preferredCurrency || "USD",
     exchangeRates: result.exchangeRates || {}
   }
@@ -50,93 +66,193 @@ function detectCurrency(symbol: string): string | null {
   return currencySymbols[symbol] || null
 }
 
-async function convertAllPrices() {
-  const { preferredCurrency, exchangeRates } = await getSettings()
+function createTooltip(): HTMLDivElement {
+  const tooltip = document.createElement("div")
+  tooltip.className = "currencyflow-tooltip"
+  tooltip.style.cssText = `
+    position: fixed;
+    background: #1f2937;
+    color: white;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    max-width: 300px;
+    z-index: 1000000;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+  `
+  document.body.appendChild(tooltip)
+  return tooltip
+}
 
-  const walker = document.createTreeWalker(
-    document.body,
-    NodeFilter.SHOW_TEXT,
-    null
-  )
+const tooltip = createTooltip()
 
-  const textNodes: Text[] = []
-  while (walker.nextNode()) {
-    const node = walker.currentNode as Text
-    if (priceRegex.test(node.nodeValue || "")) {
-      textNodes.push(node)
-    }
-    priceRegex.lastIndex = 0 // Reset regex
-  }
+function showTooltip(element: HTMLElement, content: string) {
+  tooltip.textContent = content
+  const rect = element.getBoundingClientRect()
+  tooltip.style.left = `${rect.left}px`
+  tooltip.style.top = `${rect.bottom + 8}px`
+  tooltip.style.opacity = "1"
+}
 
-  textNodes.forEach((node) => {
-    let html = node.nodeValue || ""
-    let match: RegExpExecArray | null
-    const newFragments: (string | HTMLElement)[] = []
-    let lastIndex = 0
+function hideTooltip() {
+  tooltip.style.opacity = "0"
+}
 
-    priceRegex.lastIndex = 0
-    while ((match = priceRegex.exec(html)) !== null) {
-      const [fullMatch, symbol, amountStr] = match
-      const fromCurrency = detectCurrency(symbol)
-      const amount = parseFloat(amountStr.replace(/,/g, ""))
+function processTextNode(textNode: Text) {
+  if (processedElements.has(textNode)) return
+  if (!settings.isEnabled) return
 
-      if (fromCurrency && !isNaN(amount)) {
-        const converted = convertPrice(
-          amount,
-          fromCurrency,
-          preferredCurrency,
-          exchangeRates
-        )
+  const html = textNode.nodeValue || ""
+  if (!priceRegex.test(html)) return
+  priceRegex.lastIndex = 0
 
-        if (converted !== null) {
-          // Add text before match
-          if (match.index > lastIndex) {
-            newFragments.push(html.slice(lastIndex, match.index))
-          }
+  const newFragments: (string | HTMLElement)[] = []
+  let lastIndex = 0
+  let match: RegExpExecArray | null = null
 
-          // Create a span with both original and converted price
-          const wrapper = document.createElement("span")
-          wrapper.className = "currencyflow-wrapper"
-          wrapper.innerHTML = `
-            <span class="currencyflow-original">${fullMatch}</span>
-            <span class="currencyflow-converted" style="margin-left: 8px; color: #2563eb; font-weight: 600; font-size: 0.95em;">
-              ~${preferredCurrency} ${converted.toFixed(2)}
-            </span>
-          `
-          newFragments.push(wrapper)
-          lastIndex = match.index + fullMatch.length
+  while ((match = priceRegex.exec(html)) !== null) {
+    const [fullMatch, symbol, amountStr] = match
+    const fromCurrency = detectCurrency(symbol)
+    const amount = parseFloat(amountStr.replace(/,/g, ""))
+
+    if (fromCurrency && !isNaN(amount)) {
+      const converted = convertPrice(
+        amount,
+        fromCurrency,
+        settings.preferredCurrency,
+        settings.exchangeRates
+      )
+
+      if (converted !== null) {
+        if (match.index > lastIndex) {
+          newFragments.push(html.slice(lastIndex, match.index))
         }
+
+        const wrapper = document.createElement("span")
+        wrapper.className = "currencyflow-wrapper"
+        wrapper.style.cssText = "cursor: pointer; position: relative;"
+        
+        wrapper.innerHTML = `
+          <span class="currencyflow-converted" style="color: #2563eb; font-weight: 600; background: rgba(37, 99, 235, 0.08); padding: 2px 6px; border-radius: 4px;">
+            ${settings.preferredCurrency} ${converted.toFixed(2)}
+          </span>
+        `
+
+        // Add hover for AI explanations
+        if (settings.aiEnabled) {
+          wrapper.addEventListener("mouseenter", async () => {
+            const explanation = await getAIExplanation({
+              originalAmount: amount,
+              originalCurrency: fromCurrency,
+              convertedAmount: converted,
+              convertedCurrency: settings.preferredCurrency
+            })
+            showTooltip(wrapper, explanation)
+          })
+          wrapper.addEventListener("mouseleave", hideTooltip)
+        }
+
+        newFragments.push(wrapper)
+        lastIndex = match.index + fullMatch.length
       }
     }
+  }
 
-    // Add remaining text
+  if (newFragments.length > 0) {
     if (lastIndex < html.length) {
       newFragments.push(html.slice(lastIndex))
     }
 
-    // Replace the text node
-    if (newFragments.length > 0) {
-      const parent = node.parentNode
-      if (parent) {
-        newFragments.forEach((fragment) => {
-          if (typeof fragment === "string") {
-            parent.insertBefore(document.createTextNode(fragment), node)
-          } else {
-            parent.insertBefore(fragment, node)
-          }
-        })
-        parent.removeChild(node)
-      }
+    const parent = textNode.parentNode
+    if (parent) {
+      const replacementNodes: Node[] = []
+      newFragments.forEach(fragment => {
+        if (typeof fragment === "string") {
+          replacementNodes.push(document.createTextNode(fragment))
+        } else {
+          replacementNodes.push(fragment)
+          processedElements.add(fragment)
+        }
+      })
+      
+      replacementNodes.forEach(node => parent.insertBefore(node, textNode))
+      parent.removeChild(textNode)
     }
-  })
+  }
 }
 
-// Run conversion when page loads and when DOM changes
-document.addEventListener("DOMContentLoaded", convertAllPrices)
+function processNode(node: Node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    processTextNode(node as Text)
+  } else {
+    const walker = document.createTreeWalker(
+      node as Node,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (n) => {
+          const parent = n.parentElement
+          if (
+            parent &&
+            (parent.tagName === "SCRIPT" ||
+              parent.tagName === "STYLE" ||
+              parent.tagName === "TEXTAREA" ||
+              parent.tagName === "INPUT" ||
+              parent.closest(".currencyflow-wrapper"))
+          ) {
+            return NodeFilter.FILTER_REJECT
+          }
+          return NodeFilter.FILTER_ACCEPT
+        }
+      }
+    )
+    
+    let textNode: Node | null
+    while ((textNode = walker.nextNode())) {
+      processTextNode(textNode as Text)
+    }
+  }
+}
 
-// Watch for dynamic content
-const observer = new MutationObserver(convertAllPrices)
+function convertAllPrices() {
+  if (!settings.isEnabled) {
+    // Restore original prices if disabled
+    document.querySelectorAll(".currencyflow-wrapper").forEach(wrapper => {
+      // For now, we just leave it, but we could restore if we stored original
+    })
+    return
+  }
+  processNode(document.body)
+}
+
+// Listen for storage changes to update in real-time
+chrome.storage.onChanged.addListener(async (changes) => {
+  await loadSettings()
+  convertAllPrices()
+})
+
+// Run conversion when page loads
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadSettings()
+  convertAllPrices()
+})
+
+// Watch for dynamic content changes
+const observer = new MutationObserver(async (mutations) => {
+  await loadSettings()
+  // Debounce to avoid too many calls
+  clearTimeout((window as any).currencyflowTimeout)
+  ;(window as any).currencyflowTimeout = setTimeout(() => {
+    mutations.forEach(mutation => {
+      mutation.addedNodes.forEach(node => {
+        processNode(node)
+      })
+    })
+  }, 100)
+})
 observer.observe(document.body, { childList: true, subtree: true })
 
-// Also run immediately in case DOMContentLoaded already fired
-convertAllPrices()
+// Also run immediately
+loadSettings().then(() => convertAllPrices())
